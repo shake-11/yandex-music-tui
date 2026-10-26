@@ -1,0 +1,9 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = true
+[remote "origin"]
+	url = https://github.com/shake-11/yandex-music-tui.git
+	tagOpt = --no-tags
+	fetch = +refs/*:refs/*
+	mirror = true

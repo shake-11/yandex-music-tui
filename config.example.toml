@@ -1,0 +1,41 @@
+# Example configuration for yandex-music-tui.
+#
+# Copy this file to one of:
+#   $XDG_CONFIG_HOME/yandex-tui/config.toml
+#   ~/.config/yandex-tui/config.toml
+#
+# The application writes the same format. Permissions are set to 0600 because
+# the file may contain OAuth credentials. You can leave the auth table empty and
+# sign in through the interface, or use YANDEX_MUSIC_TOKEN / YM_TOKEN.
+
+[auth]
+# Prefer the device sign-in flow (`--login`, or `d` on the auth screen). These
+# fields are for an existing session and are filled in automatically.
+access_token = ""
+refresh_token = ""
+expires_at = 0
+
+[playback]
+# Linear volume, 0.0 through 1.0.
+volume = 0.72
+# One of: "low", "normal", "high", "best".
+quality = "high"
+# Step used by Ctrl+Left / Ctrl+Right and by the arrow keys in Now Playing.
+seek_step_seconds = 10
+
+[ui]
+# Animated playback and loading indicators.
+animations = true
+# Draw album art as truecolor half-block art. Set false for a plain placeholder.
+cover_art = true
+# Below this terminal width, the labelled sidebar becomes a compact icon rail.
+compact_sidebar_below = 116
+
+[cache]
+# Keep downloaded audio between runs and allow `d` to pin tracks offline.
+# When false, playback uses a temporary session cache that is deleted on exit
+# and `d` reports that offline pinning is disabled.
+enabled = true
+# Optional override for the audio directory. Empty means
+# ~/.cache/yandex-tui/audio. Relative paths resolve from the current directory.
+directory = ""

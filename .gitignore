@@ -1,0 +1,4 @@
+/target/
+*.log
+*.svg.tmp
+.DS_Store
