@@ -1,6 +1,0 @@
-/target
-*.flac
-*.mp3
-*.m4a
-.DS_Store
-.env
