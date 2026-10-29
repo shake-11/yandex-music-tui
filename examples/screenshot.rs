@@ -19,7 +19,9 @@ use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
 use yandex_music_tui::api::demo;
-use yandex_music_tui::app::{App, Focus, Overlay, SearchFocus, SearchState};
+use yandex_music_tui::app::{
+    Action, App, Focus, InspectorTab, Mode, Overlay, SearchFocus, SearchState, Section, View,
+};
 use yandex_music_tui::config::Config;
 use yandex_music_tui::ui;
 
@@ -33,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::default();
     let mut app = match options.screen.as_str() {
         "auth" => {
-            let mut app = App::new(&config, yandex_music_tui::app::Mode::Demo);
+            let mut app = App::new(&config, Mode::Demo);
             app.auth_note = "Sign in to browse your library and play music.".into();
             app
         }
@@ -44,21 +46,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         "now" => {
             app.now_playing = true;
             app.focus = Focus::Inspector;
-            app.inspector_tab = yandex_music_tui::app::InspectorTab::Lyrics;
+            app.inspector_tab = InspectorTab::Lyrics;
         }
         "home" => {
-            app.section = yandex_music_tui::app::Section::Home;
-            app.view = yandex_music_tui::app::View::Library(yandex_music_tui::app::Section::Home);
+            app.section = Section::Home;
+            app.view = View::Library(Section::Home);
             app.nav_index = 0;
             app.focus = Focus::Main;
             app.main_selected = 1;
         }
         "liked" => {
-            app.section = yandex_music_tui::app::Section::Liked;
-            app.view = yandex_music_tui::app::View::Library(yandex_music_tui::app::Section::Liked);
-            app.nav_index = 1;
+            app.section = Section::Liked;
+            app.view = View::Library(Section::Liked);
+            app.nav_index = Section::Liked.index();
             app.focus = Focus::Main;
             app.main_selected = 0;
+        }
+        "wave" => {
+            let actions = app.open_wave();
+            if let Some(Action::LoadWave { request_id, .. }) = actions.first() {
+                app.wave_loaded(*request_id, demo::wave_batch(None));
+            }
+            app.focus = Focus::Main;
+            app.main_selected = 1;
+            app.position = std::time::Duration::from_secs(96);
         }
         "search" => {
             let query = "ноч";
@@ -138,7 +149,7 @@ impl Options {
                 "--dump" => options.dump = true,
                 "--help" | "-h" => {
                     println!(
-                        "usage: screenshot [--screen now|home|liked|search|help|auth] \
+                        "usage: screenshot [--screen now|home|wave|liked|search|help|auth] \
                          [--width N] [--height N] [--out PATH.svg] [--dump]"
                     );
                     std::process::exit(0);

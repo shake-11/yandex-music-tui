@@ -150,13 +150,16 @@ fn draw_too_small(frame: &mut Frame<'_>, area: Rect) {
 mod tests {
     use std::time::Instant;
 
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::Terminal;
 
     use super::*;
     use crate::api::demo;
-    use crate::app::{App, Focus, InspectorTab, Mode, SearchFocus, SearchState, Section, View};
+    use crate::app::{
+        Action, App, Focus, InspectorTab, Mode, SearchFocus, SearchState, Section, View,
+    };
     use crate::config::Config;
 
     fn render(app: &App, width: u16, height: u16) -> Buffer {
@@ -189,6 +192,9 @@ mod tests {
         let wide = whole(&render(&app, 200, 60), 200, 60);
         assert!(wide.contains("YOUR LIBRARY"));
         assert!(wide.contains("RECENTLY LIKED"));
+        assert!(wide.contains("My Wave"));
+        assert!(wide.contains("Albums"));
+        assert!(wide.contains("Search"));
         assert!(wide.contains("Queue"));
         assert!(wide.contains("3 TRACKS CACHED"));
 
@@ -206,12 +212,57 @@ mod tests {
         for hint in [
             "j/k  move",
             "enter  play",
+            "w  wave",
             "/  search",
-            "f  like",
             "v  player",
         ] {
             assert!(footer.contains(hint), "missing `{hint}` in {footer:?}");
         }
+    }
+
+    #[test]
+    fn wave_page_prompts_for_a_signal_and_renders_the_live_queue() {
+        let config = Config::default();
+        let mut app = App::demo(&config);
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('w')));
+        let [Action::LoadWave { request_id, .. }] = actions.as_slice() else {
+            panic!("w must request a wave batch");
+        };
+        let loading = whole(&render(&app, 80, 24), 80, 24);
+        assert!(loading.contains("PERSONAL RADIO"));
+        assert!(loading.contains("Tuning your wave"));
+        let footer = loading.lines().last().unwrap_or_default();
+        assert!(footer.contains("w  wave"));
+
+        app.wave_loaded(*request_id, demo::wave_batch(None));
+        let compact = whole(&render(&app, 80, 24), 80, 24);
+        assert!(compact.contains("ON AIR"));
+        assert!(compact.contains("ENDLESS RADIO"));
+        assert!(compact.contains("YOUR WAVE QUEUE"));
+        let current = app.current.as_ref().expect("wave track");
+        assert!(compact.contains(&current.title));
+        let footer = compact.lines().last().unwrap_or_default();
+        assert!(footer.contains("enter  play"));
+        assert!(footer.contains("n  next"));
+
+        let wide = whole(&render(&app, 200, 60), 200, 60);
+        assert!(wide.contains("ON AIR"));
+        assert!(wide.contains("YOUR WAVE QUEUE"));
+    }
+
+    #[test]
+    fn wave_loss_is_visible_and_actionable() {
+        let config = Config::default();
+        let mut app = App::demo(&config);
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('w')));
+        let [Action::LoadWave { request_id, .. }] = actions.as_slice() else {
+            panic!("w must request a wave batch");
+        };
+        app.wave_failed(*request_id, "the network request did not complete".into());
+        let text = whole(&render(&app, 80, 24), 80, 24);
+        assert!(text.contains("My Wave is off the air"));
+        assert!(text.contains("network request"));
+        assert!(text.contains("enter  retry"));
     }
 
     #[test]
@@ -265,6 +316,7 @@ mod tests {
         assert!(text.contains("NAVIGATION"));
         assert!(text.contains("PLAYBACK"));
         assert!(text.contains("INTERFACE"));
+        assert!(text.contains("Start or show My Wave"));
         assert!(text.contains("ctrl+c"));
     }
 

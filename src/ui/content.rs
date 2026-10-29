@@ -2,12 +2,13 @@
 //! views. Everything here is responsive to the pane width rather than the whole
 //! terminal, so a wide screen with a narrow content column still reads cleanly.
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, CollectionRequest, CollectionView, Focus, Section, View};
+use crate::app::{App, CollectionRequest, CollectionView, Focus, Section, View, WaveState};
 use crate::model::{
     AlbumSummary, ArtistSummary, LibraryData, LoadedCollection, PlaylistSummary, Track,
 };
@@ -23,6 +24,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App, area: Rect) {
     primitives::paint(frame, area, theme::base());
     match &app.view {
         View::Library(Section::Home) => draw_home(frame, app, area),
+        View::Library(Section::Wave) => draw_wave(frame, app, area),
         View::Library(Section::Liked) => draw_liked(frame, app, area),
         View::Library(section) => draw_saved(frame, app, area, *section),
         View::Collection(collection) => draw_collection(frame, app, area, collection),
@@ -276,6 +278,343 @@ fn draw_home(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
+fn draw_wave(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let ready = app.wave.as_ref().is_some_and(|wave| wave.ready);
+    let subtitle = if ready {
+        "An endless stream shaped by what you actually listen to."
+    } else {
+        "Your own station. No playlist, no final track."
+    };
+    let heading = preamble(
+        frame,
+        area,
+        "PERSONAL RADIO",
+        "My Wave",
+        subtitle,
+        Some("∞ ENDLESS"),
+    );
+    let content_y = if heading.compact {
+        heading.title_y + 2
+    } else {
+        heading.content_y
+    };
+    let content = Rect::new(
+        heading.inner.x,
+        content_y,
+        heading.inner.width,
+        area.y + area.height - content_y,
+    );
+    if content.height == 0 {
+        return;
+    }
+
+    let Some(wave) = &app.wave else {
+        draw_wave_prompt(
+            frame,
+            content,
+            icons::WAVE,
+            "Your wave is waiting",
+            "A personal radio stream that keeps finding the next track. Start it once and let it run.",
+            ("enter", "tune in"),
+            theme::YELLOW,
+        );
+        return;
+    };
+
+    if !wave.ready {
+        if wave.loading {
+            draw_wave_prompt(
+                frame,
+                content,
+                components::spinner(app.animation_tick),
+                "Tuning your wave",
+                "Finding a first batch of tracks from your listening profile. This keeps retrying if the signal drops.",
+                ("esc", "sidebar"),
+                theme::YELLOW,
+            );
+        } else if let Some(error) = &wave.error {
+            draw_wave_prompt(
+                frame,
+                content,
+                icons::WARNING,
+                "My Wave is off the air",
+                &format!("{error}. Automatic retries are scheduled; press enter to try again now."),
+                ("enter", "retry"),
+                theme::RED,
+            );
+        } else {
+            draw_wave_prompt(
+                frame,
+                content,
+                icons::WAVE,
+                "Your wave is waiting",
+                "Press enter to start an endless personal stream. Press w from anywhere to return to it.",
+                ("enter", "tune in"),
+                theme::YELLOW,
+            );
+        }
+        return;
+    }
+
+    draw_wave_live(frame, app, content, wave);
+}
+
+fn draw_wave_live(frame: &mut Frame<'_>, app: &App, area: Rect, wave: &WaveState) {
+    if area.height == 0 {
+        return;
+    }
+    let bottom = area.y + area.height;
+    let mut y = area.y;
+    let right = if wave.loading {
+        format!("{}  TUNING NEXT", components::spinner(app.animation_tick))
+    } else if wave.error.is_some() {
+        format!("{}  SIGNAL LOST", icons::WARNING)
+    } else {
+        format!("∞  {} QUEUED", app.queue.len())
+    };
+    let right_width = text::width(&right);
+    let left_width = area.width.saturating_sub(right_width as u16 + 2);
+    let status = vec![
+        Span::styled(
+            " ON AIR ",
+            Style::default()
+                .fg(theme::BG)
+                .bg(theme::YELLOW)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  ENDLESS RADIO",
+            Style::default().fg(theme::MUTED).bg(theme::BG),
+        ),
+    ];
+    primitives::line(
+        frame,
+        Rect::new(area.x, y, left_width, 1),
+        status,
+        theme::base(),
+    );
+    primitives::right_line(
+        frame,
+        Rect::new(area.x, y, area.width, 1),
+        vec![Span::styled(
+            right,
+            Style::default()
+                .fg(if wave.error.is_some() {
+                    theme::RED
+                } else if wave.loading {
+                    theme::YELLOW_SOFT
+                } else {
+                    theme::FAINT
+                })
+                .bg(theme::BG),
+        )],
+        theme::base(),
+    );
+    y += 1;
+
+    if let Some(track) = &app.current {
+        if y < bottom {
+            let title_room = usize::from(area.width).saturating_sub(18);
+            let title = text::truncate(&track.title, title_room);
+            let used = 5 + text::width(&title) + 5;
+            let artist_room = usize::from(area.width).saturating_sub(used);
+            let artist = if artist_room >= 4 {
+                text::truncate(&track.artist, artist_room)
+            } else {
+                String::new()
+            };
+            let mut spans = vec![
+                Span::styled(
+                    "NOW  ",
+                    Style::default()
+                        .fg(theme::YELLOW_DIM)
+                        .bg(theme::BG)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(title, Style::default().fg(theme::TEXT).bg(theme::BG)),
+            ];
+            if !artist.is_empty() {
+                spans.push(Span::styled(
+                    "  ·  ",
+                    Style::default().fg(theme::FAINT).bg(theme::BG),
+                ));
+                spans.push(Span::styled(
+                    artist,
+                    Style::default().fg(theme::MUTED).bg(theme::BG),
+                ));
+            }
+            primitives::line(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                spans,
+                theme::base(),
+            );
+            y += 1;
+        }
+    }
+
+    if let Some(error) = &wave.error {
+        if y < bottom {
+            let suffix = "  ·  r retry";
+            let reserved = 3 + text::width(suffix) + 1;
+            primitives::line(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                vec![
+                    Span::styled(
+                        format!("{}  ", icons::WARNING),
+                        Style::default().fg(theme::RED).bg(theme::BG),
+                    ),
+                    Span::styled(
+                        text::truncate(
+                            error,
+                            usize::from(area.width.saturating_sub(reserved as u16)),
+                        ),
+                        Style::default().fg(theme::RED).bg(theme::BG),
+                    ),
+                    Span::styled(suffix, Style::default().fg(theme::FAINT).bg(theme::BG)),
+                ],
+                theme::base(),
+            );
+            y += 1;
+        }
+    }
+
+    y += 1;
+    if y >= bottom {
+        return;
+    }
+    primitives::line(
+        frame,
+        Rect::new(area.x, y, area.width, 1),
+        vec![
+            Span::styled(
+                "YOUR WAVE QUEUE",
+                Style::default()
+                    .fg(theme::FAINT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ", Style::default().bg(theme::BG)),
+            Span::styled(icons::DOT, Style::default().fg(theme::YELLOW_DIM)),
+        ],
+        theme::base(),
+    );
+    primitives::right_line(
+        frame,
+        Rect::new(area.x, y, area.width, 1),
+        vec![Span::styled(
+            if app.focus == Focus::Main {
+                "ENTER TO PLAY"
+            } else {
+                "MY WAVE"
+            },
+            Style::default().fg(theme::FAINT),
+        )],
+        theme::base(),
+    );
+    y += 1;
+
+    let rows = Rect::new(area.x, y, area.width, bottom.saturating_sub(y));
+    if app.queue.is_empty() {
+        components::message_panel(
+            frame,
+            rows,
+            icons::WAVE,
+            "The station is between tracks",
+            "The next batch is being tuned. It will start automatically.",
+            theme::MUTED,
+        );
+    } else {
+        draw_track_rows(frame, app, rows, &app.queue);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_wave_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    icon: &str,
+    title: &str,
+    message: &str,
+    hint: (&str, &str),
+    colour: ratatui::style::Color,
+) {
+    if area.height < 3 || area.width < 8 {
+        return;
+    }
+    let shown = area.height.min(9);
+    let panel_width = area.width.min(72);
+    let box_area = Rect::new(
+        area.x + (area.width - panel_width) / 2,
+        area.y + (area.height - shown) / 2,
+        panel_width,
+        shown,
+    );
+    primitives::paint(
+        frame,
+        box_area,
+        Style::default().bg(theme::PANEL).fg(theme::TEXT_SOFT),
+    );
+    primitives::line(
+        frame,
+        Rect::new(box_area.x + 2, box_area.y + 1, 3, 1),
+        vec![Span::styled(
+            icon,
+            Style::default().fg(colour).bg(theme::PANEL),
+        )],
+        Style::default().bg(theme::PANEL),
+    );
+    primitives::line(
+        frame,
+        Rect::new(
+            box_area.x + 5,
+            box_area.y + 1,
+            box_area.width.saturating_sub(7),
+            1,
+        ),
+        vec![Span::styled(
+            text::truncate(title, usize::from(box_area.width.saturating_sub(7))),
+            Style::default()
+                .fg(theme::TEXT)
+                .bg(theme::PANEL)
+                .add_modifier(Modifier::BOLD),
+        )],
+        Style::default().bg(theme::PANEL),
+    );
+    if box_area.height >= 6 {
+        let text_area = Rect::new(
+            box_area.x + 5,
+            box_area.y + 3,
+            box_area.width.saturating_sub(7),
+            box_area.height.saturating_sub(5),
+        );
+        frame.render_widget(
+            Paragraph::new(message.to_owned())
+                .style(Style::default().fg(theme::MUTED).bg(theme::PANEL))
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .alignment(Alignment::Left),
+            text_area,
+        );
+        primitives::line(
+            frame,
+            Rect::new(
+                box_area.x + 5,
+                box_area.y + box_area.height - 2,
+                box_area.width.saturating_sub(7),
+                1,
+            ),
+            vec![
+                components::keycap(hint.0),
+                Span::styled(
+                    format!(" {}", hint.1),
+                    Style::default().fg(theme::FAINT).bg(theme::PANEL),
+                ),
+            ],
+            Style::default().bg(theme::PANEL),
+        );
+    }
+}
+
 fn first_name(app: &App) -> String {
     let name = app.profile.short_name().trim();
     if name.is_empty() {
@@ -437,7 +776,7 @@ fn draw_saved(frame: &mut Frame<'_>, app: &App, area: Rect, section: Section) {
         Section::Playlists => library.playlists.len(),
         Section::Artists => library.artists.len(),
         Section::Albums => library.albums.len(),
-        Section::Home | Section::Liked => 0,
+        Section::Home | Section::Wave | Section::Liked => 0,
     };
     let heading = preamble(
         frame,
@@ -499,7 +838,7 @@ fn draw_saved(frame: &mut Frame<'_>, app: &App, area: Rect, section: Section) {
                 draw_card_rows(frame, app, content, &library.albums);
             }
         }
-        Section::Home | Section::Liked => {}
+        Section::Home | Section::Wave | Section::Liked => {}
     }
 }
 
@@ -517,7 +856,7 @@ fn section_subtitle(section: &Section, count: Option<usize>) -> String {
             Some(count) => format!("{count} records worth returning to."),
             None => "Records worth returning to.".into(),
         },
-        Section::Home | Section::Liked => String::new(),
+        Section::Home | Section::Wave | Section::Liked => String::new(),
     }
 }
 

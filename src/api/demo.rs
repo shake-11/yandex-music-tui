@@ -10,6 +10,7 @@ use crate::cover::CoverImage;
 use crate::lyrics::Lyrics;
 use crate::model::{
     AlbumSummary, ArtistSummary, LibraryData, PlaylistSummary, Profile, SearchResults, Track,
+    WaveBatch,
 };
 
 /// A small, deliberately varied library.
@@ -280,6 +281,28 @@ pub fn queue() -> Vec<Track> {
     tracks().into_iter().take(5).collect()
 }
 
+/// A deterministic, endlessly rotating batch for the demo My Wave.
+#[must_use]
+pub fn wave_batch(queue: Option<i64>) -> WaveBatch {
+    let all = tracks();
+    let start = queue
+        .and_then(|last| {
+            all.iter()
+                .position(|track| track.id.parse::<i64>().ok() == Some(last))
+        })
+        .map_or(0, |index| (index + 1) % all.len());
+    let picked: Vec<Track> = (0..5)
+        .map(|offset| all[(start + offset) % all.len()].clone())
+        .collect();
+    let last_track_id = picked.last().and_then(|track| track.id.parse::<i64>().ok());
+    WaveBatch {
+        tracks: picked,
+        batch_id: Some(format!("demo-wave-{start}")),
+        radio_session_id: Some("demo-radio".into()),
+        last_track_id,
+    }
+}
+
 /// Time-coded lyrics for the first demo track. Original text.
 #[must_use]
 pub fn lyrics() -> Lyrics {
@@ -388,6 +411,19 @@ mod tests {
         assert!(lyrics
             .active_index(start_position(), Duration::from_secs(252))
             .is_some());
+    }
+
+    #[test]
+    fn demo_wave_keeps_rotating_batches() {
+        let all = tracks();
+        let first = wave_batch(None);
+        let second = wave_batch(first.last_track_id);
+        let third = wave_batch(second.last_track_id);
+        assert_eq!(first.tracks.len(), 5);
+        assert_eq!(first.batch_id.as_deref(), Some("demo-wave-0"));
+        assert_eq!(second.tracks[0].id, all[5].id);
+        assert_eq!(third.tracks[0].id, all[10].id);
+        assert!(third.last_track_id.is_some());
     }
 
     #[test]

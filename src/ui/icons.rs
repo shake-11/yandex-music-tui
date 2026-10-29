@@ -18,6 +18,7 @@ pub const MUTED: &str = "\u{f026}";
 pub const DOWNLOAD: &str = "\u{f019}";
 pub const CHECK: &str = "\u{f00c}";
 pub const HEADPHONES: &str = "\u{f025}";
+pub const WAVE: &str = "\u{f012}";
 pub const SYNC: &str = "\u{f021}";
 pub const DOT: &str = "\u{f111}";
 pub const WARNING: &str = "\u{f071}";

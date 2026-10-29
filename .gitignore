@@ -1,4 +1,8 @@
 /target/
+/pkg/
+/src/cargo/
+/src/yandex-music-tui/
+/yandex-music-tui/
 *.log
 *.svg.tmp
 .DS_Store

@@ -12,11 +12,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Mode, Overlay, Section};
+use crate::app::{App, Focus, Mode, Overlay, Section, SEARCH_NAV_INDEX};
 use crate::ui::text::{self, fit, truncate, width};
 use crate::ui::{icons, primitives, theme};
 
-const NAV_ROWS: usize = 6;
+const NAV_ROWS: usize = Section::ALL.len() + 1;
 
 /// Two-line application header.
 pub fn header(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -201,6 +201,8 @@ fn sync_status(app: &App) -> String {
         format!("{}  OFFLINE", icons::WARNING)
     } else if app.library_loading {
         format!("{}  SYNCING", spinner(app.animation_tick))
+    } else if app.wave.as_ref().is_some_and(|wave| wave.loading) {
+        format!("{}  TUNING WAVE", spinner(app.animation_tick))
     } else if app.mode == Mode::Demo {
         format!("{}  SIMULATED", icons::DOT)
     } else {
@@ -209,7 +211,10 @@ fn sync_status(app: &App) -> String {
 }
 
 fn status_style(app: &App) -> Style {
-    if app.retry_status().is_some() || app.library_loading {
+    if app.retry_status().is_some()
+        || app.library_loading
+        || app.wave.as_ref().is_some_and(|wave| wave.loading)
+    {
         Style::default().fg(theme::YELLOW_SOFT)
     } else if app.library_error.is_some() && app.library.is_none() {
         Style::default().fg(theme::RED)
@@ -268,17 +273,21 @@ pub fn sidebar(frame: &mut Frame<'_>, app: &App, area: Rect, compact: bool) {
     y += 2;
 
     for index in 0..NAV_ROWS {
-        if index == 5 {
+        if index == SEARCH_NAV_INDEX {
+            if y + 2 > area.y + area.height {
+                break;
+            }
             primitives::rule(
                 frame,
-                Rect::new(inner_x, y.saturating_sub(1), inner_width, 1),
+                Rect::new(inner_x, y, inner_width, 1),
                 Style::default().fg(theme::BORDER_SOFT).bg(theme::PANEL),
             );
+            y += 1;
         }
         if y >= area.y + area.height {
             break;
         }
-        let (icon, label, shortcut) = if index == 5 {
+        let (icon, label, shortcut) = if index == SEARCH_NAV_INDEX {
             (icons::SEARCH, "Search", "/".to_owned())
         } else {
             let section = Section::ALL[index];
@@ -484,7 +493,7 @@ fn compact_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let item_height = 2u16;
     let nav_start = area.y + 3;
     for index in 0..NAV_ROWS {
-        let y = nav_start + index as u16 * item_height + u16::from(index == 5);
+        let y = nav_start + index as u16 * item_height + u16::from(index == SEARCH_NAV_INDEX);
         if y + item_height > area.y + area.height {
             break;
         }
@@ -516,7 +525,7 @@ fn compact_sidebar(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .bg(background),
             );
         }
-        let icon = if index == 5 {
+        let icon = if index == SEARCH_NAV_INDEX {
             icons::SEARCH
         } else {
             Section::ALL[index].icon()
@@ -842,6 +851,8 @@ fn playback_source(app: &App) -> String {
         "NO OUTPUT".to_owned()
     } else if app.buffering {
         format!("{} BUFFERING", spinner(app.animation_tick))
+    } else if app.wave.as_ref().is_some_and(|wave| wave.ready) {
+        format!("{} MY WAVE", icons::WAVE)
     } else if app.mode == Mode::Demo {
         format!("{} SIMULATED", icons::CHECK)
     } else if app
@@ -927,6 +938,24 @@ fn footer_hints(app: &App, width: u16) -> Vec<(&'static str, &'static str)> {
             ("v/esc", "back"),
         ];
     }
+    if app.focus == Focus::Main && app.section == Section::Wave {
+        if app.wave.as_ref().is_some_and(|wave| wave.ready) {
+            return vec![
+                ("j/k", "move"),
+                ("enter", "play"),
+                ("n", "next"),
+                ("w", "wave"),
+                ("?", "help"),
+                ("v", "player"),
+            ];
+        }
+        return vec![
+            ("enter", "tune in"),
+            ("w", "wave"),
+            ("/", "search"),
+            ("?", "help"),
+        ];
+    }
     match app.focus {
         Focus::Sidebar => {
             let mut hints = vec![
@@ -944,8 +973,8 @@ fn footer_hints(app: &App, width: u16) -> Vec<(&'static str, &'static str)> {
         Focus::Main if width < 96 => vec![
             ("j/k", "move"),
             ("enter", "play"),
+            ("w", "wave"),
             ("/", "search"),
-            ("f", "like"),
             ("?", "help"),
             ("v", "player"),
         ],
@@ -954,6 +983,7 @@ fn footer_hints(app: &App, width: u16) -> Vec<(&'static str, &'static str)> {
             ("enter", "play"),
             ("h/l", "panes"),
             ("/", "search"),
+            ("w", "wave"),
             ("f", "like"),
             ("?", "help"),
             ("v", "player"),

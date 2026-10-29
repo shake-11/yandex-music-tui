@@ -586,7 +586,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
             "LIBRARY",
             &[
                 ("/", "Search the catalogue"),
-                ("1 – 5", "Jump to a section"),
+                ("1 – 5", "Jump to a saved section"),
+                ("w", "Start or show My Wave"),
                 ("f", "Like / unlike"),
                 ("d", "Keep offline"),
                 ("r", "Retry now"),

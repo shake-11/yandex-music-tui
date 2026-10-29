@@ -30,7 +30,7 @@ use crate::api::service::ApiService;
 use crate::app::{Action, App, CollectionRequest, Mode};
 use crate::cache::AudioCache;
 use crate::config::{AudioQuality, Config, ConfigError, Paths};
-use crate::model::{LoadedCollection, Profile};
+use crate::model::{LoadedCollection, Profile, WaveBatch, WaveFeedbackKind};
 use crate::player::{AudioPlayer, PlayerCommand, PlayerEvent};
 
 /// Command-line options that affect runtime startup.
@@ -89,6 +89,10 @@ enum Event {
     SearchLoaded {
         request_id: u64,
         result: Result<crate::model::SearchResults, String>,
+    },
+    WaveLoaded {
+        request_id: u64,
+        result: Result<WaveBatch, String>,
     },
     LyricsLoaded {
         request_id: u64,
@@ -298,6 +302,18 @@ impl Runner {
                 request_id,
             } => self.load_collection(request, request_id),
             Action::Search { query, request_id } => self.search(query, request_id),
+            Action::LoadWave {
+                station,
+                queue,
+                request_id,
+            } => self.load_wave(station, queue, request_id),
+            Action::WaveFeedback {
+                station,
+                kind,
+                track_id,
+                batch_id,
+                total_played_seconds,
+            } => self.wave_feedback(station, kind, track_id, batch_id, total_played_seconds),
             Action::Playback { track } => self.begin_playback(track),
             Action::Pause => {
                 if let Some(player) = &self.player {
@@ -414,6 +430,52 @@ impl Runner {
         tokio::spawn(async move {
             let result = service.search(&query).await;
             let _ = tx.send(Event::SearchLoaded { request_id, result });
+        });
+    }
+
+    fn load_wave(&mut self, station: String, queue: Option<i64>, request_id: u64) {
+        if self.demo {
+            let _ = self.tx.send(Event::WaveLoaded {
+                request_id,
+                result: Ok(demo::wave_batch(queue)),
+            });
+            return;
+        }
+        let Some(service) = self.service() else {
+            let _ = self.tx.send(Event::WaveLoaded {
+                request_id,
+                result: Err("Your session is not connected.".into()),
+            });
+            return;
+        };
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = service.load_wave(&station, queue).await;
+            let _ = tx.send(Event::WaveLoaded { request_id, result });
+        });
+    }
+
+    fn wave_feedback(
+        &mut self,
+        station: String,
+        kind: WaveFeedbackKind,
+        track_id: Option<i64>,
+        batch_id: Option<String>,
+        total_played_seconds: Option<f64>,
+    ) {
+        if self.demo {
+            return;
+        }
+        let Some(service) = &self.service else {
+            return;
+        };
+        let service = service.clone();
+        tokio::spawn(async move {
+            // Rotor feedback is best-effort. Playback and UI state must never
+            // wait for it or fail because the station was unreachable.
+            let _ = service
+                .wave_feedback(&station, kind, track_id, batch_id, total_played_seconds)
+                .await;
         });
     }
 
@@ -588,6 +650,13 @@ impl Runner {
                 Ok(results) => self.app.apply_search(request_id, results),
                 Err(message) => self.app.search_failed(request_id, message),
             },
+            Event::WaveLoaded { request_id, result } => match result {
+                Ok(batch) => {
+                    let actions = self.app.wave_loaded(request_id, batch);
+                    self.dispatch_all(actions);
+                }
+                Err(message) => self.app.wave_failed(request_id, message),
+            },
             Event::LyricsLoaded { request_id, result } => match result {
                 Ok(lyrics) => self.app.lyrics_loaded(request_id, lyrics),
                 Err(message) => self.app.lyrics_failed(request_id, message),
@@ -673,7 +742,8 @@ impl Runner {
                     }
                 }
                 PlayerEvent::Started(track_id) => {
-                    self.app.playback_started(&track_id);
+                    let actions = self.app.playback_started(&track_id);
+                    self.dispatch_all(actions);
                 }
                 PlayerEvent::Progress { track_id, position } => {
                     if current_id.as_deref() == Some(track_id.as_str()) {

@@ -5,7 +5,7 @@
 //! the interface deterministic and makes the whole TUI easy to render in a test
 //! backend or screenshot generator.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -16,7 +16,7 @@ use crate::cover::CoverImage;
 use crate::lyrics::Lyrics;
 use crate::model::{
     AlbumSummary, ArtistSummary, LibraryData, LoadedCollection, PlaylistSummary, Profile,
-    SearchResults, Track,
+    SearchResults, Track, WaveBatch, WaveFeedbackKind, MY_WAVE_STATION,
 };
 
 /// Which catalogue source is active.
@@ -41,6 +41,7 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Home,
+    Wave,
     Liked,
     Playlists,
     Artists,
@@ -49,8 +50,9 @@ pub enum Section {
 
 impl Section {
     /// Sections in sidebar order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Home,
+        Self::Wave,
         Self::Liked,
         Self::Playlists,
         Self::Artists,
@@ -62,10 +64,11 @@ impl Section {
     pub const fn index(self) -> usize {
         match self {
             Self::Home => 0,
-            Self::Liked => 1,
-            Self::Playlists => 2,
-            Self::Artists => 3,
-            Self::Albums => 4,
+            Self::Wave => 1,
+            Self::Liked => 2,
+            Self::Playlists => 3,
+            Self::Artists => 4,
+            Self::Albums => 5,
         }
     }
 
@@ -74,6 +77,7 @@ impl Section {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Home => "Home",
+            Self::Wave => "My Wave",
             Self::Liked => "Liked tracks",
             Self::Playlists => "Playlists",
             Self::Artists => "Artists",
@@ -86,6 +90,7 @@ impl Section {
     pub const fn eyebrow(self) -> &'static str {
         match self {
             Self::Home => "YOUR LIBRARY",
+            Self::Wave => "PERSONAL RADIO",
             Self::Liked => "COLLECTION",
             Self::Playlists => "SAVED & CREATED",
             Self::Artists => "PEOPLE YOU FOLLOW",
@@ -99,6 +104,7 @@ impl Section {
         // Font Awesome codepoints embedded in Nerd Fonts.
         match self {
             Self::Home => "\u{f015}",
+            Self::Wave => "\u{f012}",
             Self::Liked => "\u{f004}",
             Self::Playlists => "\u{f03a}",
             Self::Artists => "\u{f007}",
@@ -106,11 +112,12 @@ impl Section {
         }
     }
 
-    /// Numeric shortcut.
+    /// Navigation shortcut.
     #[must_use]
     pub const fn shortcut(self) -> char {
         match self {
             Self::Home => '1',
+            Self::Wave => 'w',
             Self::Liked => '2',
             Self::Playlists => '3',
             Self::Artists => '4',
@@ -118,7 +125,7 @@ impl Section {
         }
     }
 
-    /// Resolve a numeric shortcut.
+    /// Resolve a section shortcut.
     #[must_use]
     pub fn from_shortcut(ch: char) -> Option<Self> {
         Self::ALL
@@ -282,6 +289,41 @@ pub struct DevicePrompt {
     pub verification_url: String,
 }
 
+/// The live My Wave radio session.
+#[derive(Debug, Clone)]
+pub struct WaveState {
+    pub station: String,
+    pub batch_id: Option<String>,
+    pub radio_session_id: Option<String>,
+    pub loading: bool,
+    /// True once at least one batch has been appended to the queue.
+    pub ready: bool,
+    pub error: Option<String>,
+    request_id: u64,
+    next_queue: Option<i64>,
+    pending_play: bool,
+    radio_started_sent: bool,
+    batch_ids: HashMap<String, String>,
+}
+
+impl WaveState {
+    fn new() -> Self {
+        Self {
+            station: MY_WAVE_STATION.into(),
+            batch_id: None,
+            radio_session_id: None,
+            loading: false,
+            ready: false,
+            error: None,
+            request_id: 0,
+            next_queue: None,
+            pending_play: false,
+            radio_started_sent: false,
+            batch_ids: HashMap::new(),
+        }
+    }
+}
+
 /// A transient footer message.
 #[derive(Debug, Clone)]
 pub struct Notice {
@@ -316,6 +358,7 @@ impl Notice {
 #[derive(Debug, Clone)]
 enum RetryTarget {
     Library,
+    Wave,
     Collection(CollectionRequest),
 }
 
@@ -331,6 +374,7 @@ impl RetryTarget {
     fn label(&self) -> &'static str {
         match self {
             Self::Library => "library sync",
+            Self::Wave => "My Wave",
             Self::Collection(_) => "collection",
         }
     }
@@ -373,6 +417,18 @@ pub enum Action {
         track: Track,
         request_id: u64,
     },
+    LoadWave {
+        station: String,
+        queue: Option<i64>,
+        request_id: u64,
+    },
+    WaveFeedback {
+        station: String,
+        kind: WaveFeedbackKind,
+        track_id: Option<i64>,
+        batch_id: Option<String>,
+        total_played_seconds: Option<f64>,
+    },
     BeginDeviceAuth {
         generation: u64,
     },
@@ -382,7 +438,8 @@ pub enum Action {
     },
 }
 
-const SEARCH_NAV_INDEX: usize = 5;
+/// Search is the final row after every saved section.
+pub const SEARCH_NAV_INDEX: usize = Section::ALL.len();
 
 /// The complete application state rendered by the UI.
 pub struct App {
@@ -410,6 +467,8 @@ pub struct App {
     pub queue: Vec<Track>,
     pub queue_cursor: usize,
     pub queue_selected: usize,
+    pub wave: Option<WaveState>,
+    wave_seq: u64,
     pub inspector_tab: InspectorTab,
 
     pub current: Option<Track>,
@@ -472,6 +531,8 @@ impl App {
             queue: Vec::new(),
             queue_cursor: 0,
             queue_selected: 0,
+            wave: None,
+            wave_seq: 0,
             inspector_tab: InspectorTab::Queue,
             current: None,
             position: Duration::ZERO,
@@ -721,6 +782,190 @@ impl App {
         self.schedule_retry(RetryTarget::Collection(request), message);
     }
 
+    /// Show My Wave, starting or retrying it when necessary.
+    pub fn open_wave(&mut self) -> Vec<Action> {
+        self.switch_section(Section::Wave, false);
+        let needs_load = match &self.wave {
+            None => true,
+            Some(wave) => !wave.loading && (!wave.ready || wave.error.is_some()),
+        };
+        if !needs_load {
+            return Vec::new();
+        }
+        if self.wave.is_none() {
+            self.wave = Some(WaveState::new());
+        }
+        self.load_wave_batch()
+    }
+
+    /// Apply a batch from the My Wave rotor.
+    pub fn wave_loaded(&mut self, request_id: u64, batch: WaveBatch) -> Vec<Action> {
+        let Some(wave) = self.wave.as_ref() else {
+            return Vec::new();
+        };
+        if wave.request_id != request_id {
+            return Vec::new();
+        }
+        if batch.tracks.is_empty() {
+            self.wave_failed(request_id, "the station returned no playable tracks".into());
+            return Vec::new();
+        }
+
+        let was_ready = wave.ready;
+        let old_len = self.queue.len();
+        let pending_play = wave.pending_play;
+        let mut actions = Vec::new();
+
+        {
+            let wave = self.wave.as_mut().expect("wave was checked above");
+            wave.loading = false;
+            wave.error = None;
+            wave.ready = true;
+            wave.batch_id = batch.batch_id.clone();
+            wave.radio_session_id = batch.radio_session_id.clone();
+            wave.next_queue = batch.last_track_id.or_else(|| {
+                batch
+                    .tracks
+                    .last()
+                    .and_then(|track| track.id.parse::<i64>().ok())
+            });
+            wave.pending_play = false;
+            if let Some(batch_id) = &batch.batch_id {
+                for track in &batch.tracks {
+                    wave.batch_ids.insert(track.id.clone(), batch_id.clone());
+                }
+            }
+        }
+        if matches!(self.retry_target(), Some(RetryTarget::Wave)) {
+            self.retry = None;
+        }
+
+        if !was_ready {
+            self.queue.clear();
+            self.queue_cursor = 0;
+            self.queue_selected = 0;
+            self.main_selected = 0;
+            if self.mode == Mode::Live {
+                let send_started = self
+                    .wave
+                    .as_mut()
+                    .is_some_and(|wave| !wave.radio_started_sent);
+                if send_started {
+                    let station = self
+                        .wave
+                        .as_ref()
+                        .map_or_else(|| MY_WAVE_STATION.to_owned(), |wave| wave.station.clone());
+                    if let Some(wave) = &mut self.wave {
+                        wave.radio_started_sent = true;
+                    }
+                    actions.push(Action::WaveFeedback {
+                        station,
+                        kind: WaveFeedbackKind::RadioStarted,
+                        track_id: None,
+                        batch_id: None,
+                        total_played_seconds: None,
+                    });
+                }
+            }
+        }
+        self.queue.extend(batch.tracks);
+
+        if !was_ready {
+            actions.extend(self.start_queue_index(0));
+        } else if pending_play {
+            actions.extend(self.start_queue_index(old_len));
+        }
+        actions
+    }
+
+    /// Surface a My Wave request failure and schedule an automatic retry.
+    pub fn wave_failed(&mut self, request_id: u64, message: String) {
+        let Some(wave) = &mut self.wave else {
+            return;
+        };
+        if wave.request_id != request_id {
+            return;
+        }
+        wave.loading = false;
+        wave.error = Some(message.clone());
+        self.set_notice(
+            format!("My Wave lost signal: {message}. Retrying…"),
+            NoticeKind::Error,
+        );
+        self.schedule_retry(RetryTarget::Wave, message);
+    }
+
+    fn load_wave_batch(&mut self) -> Vec<Action> {
+        self.wave_seq = self.wave_seq.wrapping_add(1);
+        let request_id = self.wave_seq;
+        // A manual request supersedes an automatic retry that is still waiting,
+        // so one tuning attempt cannot spawn a duplicate request on the next tick.
+        if matches!(self.retry_target(), Some(RetryTarget::Wave)) {
+            if let Some(plan) = &mut self.retry {
+                plan.due = None;
+            }
+        }
+        let Some(wave) = &mut self.wave else {
+            return Vec::new();
+        };
+        wave.request_id = request_id;
+        wave.loading = true;
+        wave.error = None;
+        let station = wave.station.clone();
+        let queue = wave.next_queue;
+        vec![Action::LoadWave {
+            station,
+            queue,
+            request_id,
+        }]
+    }
+
+    fn request_wave_extension(&mut self) -> Vec<Action> {
+        let Some(wave) = &self.wave else {
+            return Vec::new();
+        };
+        if !wave.ready || wave.loading {
+            if wave.loading {
+                self.set_notice("Tuning the next batch of your wave…", NoticeKind::Info);
+            }
+            return Vec::new();
+        }
+        if let Some(wave) = &mut self.wave {
+            wave.pending_play = true;
+        }
+        self.load_wave_batch()
+    }
+
+    fn wave_feedback_action(
+        &self,
+        kind: WaveFeedbackKind,
+        total_played_seconds: Option<f64>,
+    ) -> Option<Action> {
+        if self.mode != Mode::Live {
+            return None;
+        }
+        let wave = self.wave.as_ref()?;
+        if !wave.ready {
+            return None;
+        }
+        let track = self.current.as_ref()?;
+        let track_id = track.id.parse::<i64>().ok()?;
+        Some(Action::WaveFeedback {
+            station: wave.station.clone(),
+            kind,
+            track_id: Some(track_id),
+            batch_id: wave.batch_ids.get(&track.id).cloned(),
+            total_played_seconds,
+        })
+    }
+
+    fn deactivate_wave(&mut self) {
+        self.wave = None;
+        if matches!(self.retry_target(), Some(RetryTarget::Wave)) {
+            self.retry = None;
+        }
+    }
+
     /// Start a search for a debounced query.
     pub fn apply_search(&mut self, request_id: u64, results: SearchResults) {
         let Some(Overlay::Search(search)) = &mut self.overlay else {
@@ -784,13 +1029,16 @@ impl App {
     }
 
     /// Mark playback as ready.
-    pub fn playback_started(&mut self, track_id: &str) {
+    pub fn playback_started(&mut self, track_id: &str) -> Vec<Action> {
         if self.current.as_ref().map(|track| track.id.as_str()) != Some(track_id) {
-            return;
+            return Vec::new();
         }
         self.buffering = false;
         self.playing = true;
         self.last_track_change = Instant::now();
+        self.wave_feedback_action(WaveFeedbackKind::TrackStarted, None)
+            .into_iter()
+            .collect()
     }
 
     /// Mark playback as failed while keeping the selection intact.
@@ -812,18 +1060,23 @@ impl App {
 
     /// Handle the end of a track. Returns playback actions for the next track.
     pub fn playback_finished(&mut self) -> Vec<Action> {
-        if self.queue.len() <= 1 {
-            self.playing = false;
-            self.position = self.duration;
-            return Vec::new();
+        let mut actions = Vec::new();
+        if let Some(feedback) = self.wave_feedback_action(
+            WaveFeedbackKind::TrackFinished,
+            Some(self.duration.as_secs_f64()),
+        ) {
+            actions.push(feedback);
         }
         if self.queue_cursor + 1 < self.queue.len() {
-            self.start_queue_index(self.queue_cursor + 1)
-        } else {
-            self.playing = false;
-            self.position = self.duration;
-            Vec::new()
+            actions.extend(self.start_queue_index(self.queue_cursor + 1));
+            return actions;
         }
+        self.playing = false;
+        self.position = self.duration;
+        if self.wave.as_ref().is_some_and(|wave| wave.ready) {
+            actions.extend(self.request_wave_extension());
+        }
+        actions
     }
 
     /// Record that a track is available offline.
@@ -907,7 +1160,9 @@ impl App {
     #[must_use]
     pub fn content_error(&self) -> Option<&str> {
         match &self.view {
-            View::Library(Section::Home | Section::Liked) => self.library_error.as_deref(),
+            View::Library(Section::Wave) => {
+                self.wave.as_ref().and_then(|wave| wave.error.as_deref())
+            }
             View::Library(_) => self.library_error.as_deref(),
             View::Collection(collection) => collection.error.as_deref(),
         }
@@ -934,6 +1189,13 @@ impl App {
                     .library
                     .as_ref()
                     .map_or(0, |library| library.liked_tracks.len()),
+                Section::Wave => {
+                    if self.wave.as_ref().is_some_and(|wave| wave.ready) {
+                        self.queue.len()
+                    } else {
+                        0
+                    }
+                }
                 Section::Playlists => self
                     .library
                     .as_ref()
@@ -962,6 +1224,13 @@ impl App {
                 .library
                 .as_ref()
                 .map_or(&[], |library| library.liked_tracks.as_slice()),
+            View::Library(Section::Wave) => {
+                if self.wave.as_ref().is_some_and(|wave| wave.ready) {
+                    self.queue.as_slice()
+                } else {
+                    &[]
+                }
+            }
             View::Library(_) => &[],
         }
     }
@@ -1039,6 +1308,13 @@ impl App {
                 Some(RetryTarget::Library) => {
                     actions.push(self.begin_library_load());
                 }
+                Some(RetryTarget::Wave) => {
+                    if self.wave.is_some() {
+                        actions.extend(self.load_wave_batch());
+                    } else {
+                        self.retry = None;
+                    }
+                }
                 Some(RetryTarget::Collection(request)) => {
                     let matches_view = matches!(
                         &self.view,
@@ -1091,6 +1367,9 @@ impl App {
         if key.code == KeyCode::Char('/') {
             self.open_search();
             return Vec::new();
+        }
+        if key.code == KeyCode::Char('w') {
+            return self.open_wave();
         }
         if key.code == KeyCode::Char('q') {
             return vec![Action::Quit];
@@ -1397,7 +1676,7 @@ impl App {
         if let Some(section) = Section::ALL.get(self.nav_index).copied() {
             self.section = section;
             self.view = View::Library(section);
-            self.main_selected = 0;
+            self.main_selected = self.default_main_selection();
         }
     }
 
@@ -1505,6 +1784,23 @@ impl App {
                 };
                 vec![self.open_collection(CollectionRequest::Album(album))]
             }
+            View::Library(Section::Wave) => {
+                let ready = self.wave.as_ref().is_some_and(|wave| wave.ready);
+                if ready && !self.queue.is_empty() {
+                    let index = self.main_selected.min(self.queue.len() - 1);
+                    return self.start_queue_index(index);
+                }
+                if self.wave.as_ref().is_some_and(|wave| wave.loading) {
+                    self.set_notice("Tuning your wave…", NoticeKind::Info);
+                    return Vec::new();
+                }
+                if self.wave.is_some() {
+                    self.load_wave_batch()
+                } else {
+                    self.wave = Some(WaveState::new());
+                    self.load_wave_batch()
+                }
+            }
             View::Library(Section::Home | Section::Liked) | View::Collection(_) => {
                 let index = self.main_selected;
                 self.start_visible_track(index)
@@ -1517,6 +1813,7 @@ impl App {
         if tracks.is_empty() {
             return Vec::new();
         }
+        self.deactivate_wave();
         let index = index.min(tracks.len() - 1);
         self.queue = tracks;
         self.queue_cursor = index;
@@ -1536,6 +1833,9 @@ impl App {
         self.buffering = self.mode == Mode::Live;
         self.last_track_change = Instant::now();
         self.queue_selected = self.queue_cursor;
+        if matches!(self.view, View::Library(Section::Wave)) {
+            self.main_selected = self.queue_cursor;
+        }
 
         self.lyrics = None;
         self.lyrics_loading = false;
@@ -1593,6 +1893,25 @@ impl App {
         if self.queue.is_empty() {
             return Vec::new();
         }
+        let at_wave_end = forward
+            && self.queue_cursor + 1 >= self.queue.len()
+            && self.wave.as_ref().is_some_and(|wave| wave.ready);
+        if at_wave_end {
+            let mut actions = Vec::new();
+            if self.wave.as_ref().is_some_and(|wave| wave.loading) {
+                self.set_notice("Tuning the next batch of your wave…", NoticeKind::Info);
+                return actions;
+            }
+            if !self.buffering {
+                if let Some(feedback) = self
+                    .wave_feedback_action(WaveFeedbackKind::Skip, Some(self.position.as_secs_f64()))
+                {
+                    actions.push(feedback);
+                }
+            }
+            actions.extend(self.request_wave_extension());
+            return actions;
+        }
         let cursor = if forward {
             if self.queue_cursor + 1 < self.queue.len() {
                 self.queue_cursor + 1
@@ -1611,7 +1930,16 @@ impl App {
         if cursor == self.queue_cursor && self.current.is_some() {
             return Vec::new();
         }
-        self.start_queue_index(cursor)
+        let mut actions = Vec::new();
+        if forward && !self.buffering && self.wave.as_ref().is_some_and(|wave| wave.ready) {
+            if let Some(feedback) =
+                self.wave_feedback_action(WaveFeedbackKind::Skip, Some(self.position.as_secs_f64()))
+            {
+                actions.push(feedback);
+            }
+        }
+        actions.extend(self.start_queue_index(cursor));
+        actions
     }
 
     fn toggle_playback(&mut self) -> Vec<Action> {
@@ -1787,7 +2115,7 @@ impl App {
 
     fn back_to_library(&mut self) {
         self.view = View::Library(self.section);
-        self.main_selected = 0;
+        self.main_selected = self.default_main_selection();
         self.focus = Focus::Main;
     }
 
@@ -1795,10 +2123,21 @@ impl App {
         self.section = section;
         self.nav_index = section.index();
         self.view = View::Library(section);
-        self.main_selected = 0;
+        self.main_selected = self.default_main_selection();
         self.now_playing = false;
         if !keep_focus {
             self.focus = Focus::Main;
+        }
+    }
+
+    fn default_main_selection(&self) -> usize {
+        if self.section == Section::Wave
+            && self.wave.as_ref().is_some_and(|wave| wave.ready)
+            && !self.queue.is_empty()
+        {
+            self.queue_cursor.min(self.queue.len() - 1)
+        } else {
+            0
         }
     }
 
@@ -1832,6 +2171,7 @@ impl App {
                     return Vec::new();
                 }
                 self.overlay = None;
+                self.deactivate_wave();
                 self.queue = tracks;
                 self.queue_cursor = hit.index;
                 self.queue_selected = hit.index;
@@ -1975,5 +2315,178 @@ mod tests {
         app.position = app.duration - Duration::from_millis(10);
         let _ = app.tick(Duration::from_millis(50));
         assert!(!app.playing);
+    }
+
+    fn wave_request(actions: &[Action]) -> u64 {
+        let [Action::LoadWave { request_id, .. }] = actions else {
+            panic!("expected exactly one wave request, got {actions:?}");
+        };
+        *request_id
+    }
+
+    fn demo_wave_batch(skip: usize, take: usize) -> WaveBatch {
+        let tracks: Vec<Track> = demo::tracks().into_iter().skip(skip).take(take).collect();
+        let last_track_id = tracks.last().and_then(|track| track.id.parse::<i64>().ok());
+        WaveBatch {
+            tracks,
+            batch_id: Some(format!("demo-batch-{skip}")),
+            radio_session_id: Some("demo-radio".into()),
+            last_track_id,
+        }
+    }
+
+    #[test]
+    fn wave_starts_and_refills_itself_at_the_end() {
+        let mut app = App::demo(&config());
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('w')));
+        let request_id = wave_request(&actions);
+        assert_eq!(app.section, Section::Wave);
+        assert!(app.wave.as_ref().is_some_and(|wave| wave.loading));
+
+        let first = demo_wave_batch(0, 1);
+        let first_id = first.tracks[0].id.clone();
+        let first_last_id = first.last_track_id;
+        let actions = app.wave_loaded(request_id, first);
+        assert!(matches!(actions.first(), Some(Action::Playback { .. })));
+        assert_eq!(app.queue.len(), 1);
+        assert_eq!(app.current.as_ref().map(|track| &track.id), Some(&first_id));
+        assert!(app.wave.as_ref().is_some_and(|wave| wave.ready));
+        assert_eq!(app.main_len(), 1);
+
+        // At the end of the queue, `n` tunes the next rotor batch instead of
+        // wrapping around to the first already-played track.
+        app.position = Duration::from_secs(12);
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(matches!(
+            actions.as_slice(),
+            [Action::LoadWave { queue, .. }] if *queue == first_last_id
+        ));
+        let extension_request = wave_request(&actions);
+        assert!(app.wave.as_ref().is_some_and(|wave| wave.loading));
+        let repeated = app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(repeated.is_empty());
+
+        let next = demo_wave_batch(2, 2);
+        let next_first = next.tracks[0].id.clone();
+        let actions = app.wave_loaded(extension_request, next);
+        assert!(matches!(actions.first(), Some(Action::Playback { .. })));
+        assert_eq!(app.queue.len(), 3);
+        assert_eq!(app.queue_cursor, 1);
+        assert_eq!(
+            app.current.as_ref().map(|track| &track.id),
+            Some(&next_first)
+        );
+    }
+
+    #[test]
+    fn wave_late_batches_and_failures_stay_contained() {
+        let mut app = App::demo(&config());
+        let request_id = wave_request(&app.open_wave());
+        let original = app.queue.clone();
+
+        let stale = app.wave_loaded(request_id.wrapping_add(9), demo_wave_batch(0, 2));
+        assert!(stale.is_empty());
+        assert_eq!(app.queue, original);
+        assert!(!app.wave.as_ref().is_some_and(|wave| wave.ready));
+
+        app.wave_failed(request_id, "the network request did not complete".into());
+        assert!(app
+            .wave
+            .as_ref()
+            .and_then(|wave| wave.error.as_deref())
+            .is_some_and(|error| error.contains("network")));
+        assert!(app
+            .retry_status()
+            .is_some_and(|status| status.contains("My Wave")));
+
+        // The next request id invalidates the failed attempt's late result, and
+        // an explicit retry cancels the automatic retry that was still waiting.
+        let retried = wave_request(&app.open_wave());
+        assert_ne!(retried, request_id);
+        assert!(app.retry.as_ref().and_then(|plan| plan.due).is_none());
+        let retried_again = app.wave_loaded(request_id, demo_wave_batch(0, 1));
+        assert!(retried_again.is_empty());
+        assert!(app.queue == original);
+    }
+
+    #[test]
+    fn wave_failure_during_an_extension_keeps_the_pending_play() {
+        let mut app = App::demo(&config());
+        let request_id = wave_request(&app.open_wave());
+        app.wave_loaded(request_id, demo_wave_batch(0, 1));
+
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        let extension_request = wave_request(&actions);
+        app.wave_failed(extension_request, "offline".into());
+        assert!(app.wave.as_ref().is_some_and(|wave| wave.pending_play));
+        assert!(app.wave.as_ref().is_some_and(|wave| wave.ready));
+
+        let retry_id = wave_request(&app.open_wave());
+        let actions = app.wave_loaded(retry_id, demo_wave_batch(1, 1));
+        assert!(matches!(actions.first(), Some(Action::Playback { .. })));
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue_cursor, 1);
+    }
+
+    #[test]
+    fn live_wave_reports_radio_and_track_feedback() {
+        let mut app = App::new(&config(), Mode::Live);
+        app.signed_in = true;
+        app.focus = Focus::Main;
+        let request_id = wave_request(&app.open_wave());
+        let batch = demo_wave_batch(0, 1);
+        let expected_batch = batch.batch_id.clone();
+        let actions = app.wave_loaded(request_id, batch);
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::WaveFeedback {
+                kind: WaveFeedbackKind::RadioStarted,
+                track_id: None,
+                ..
+            }
+        )));
+        let current_id = app.current.as_ref().expect("wave track").id.clone();
+        let actions = app.playback_started(&current_id);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::WaveFeedback {
+                kind: WaveFeedbackKind::TrackStarted,
+                batch_id: Some(batch_id),
+                ..
+            } if Some(batch_id) == expected_batch.as_ref()
+        )));
+
+        app.position = Duration::from_secs(17);
+        let actions = app.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Action::WaveFeedback {
+                    kind: WaveFeedbackKind::Skip,
+                    total_played_seconds: Some(seconds),
+                    ..
+                } if (*seconds - 17.0).abs() < f64::EPSILON
+            )),
+            "missing skip feedback: {actions:?}"
+        );
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, Action::LoadWave { .. })));
+    }
+
+    #[test]
+    fn starting_a_library_track_leaves_the_wave() {
+        let mut app = App::demo(&config());
+        let request_id = wave_request(&app.open_wave());
+        app.wave_loaded(request_id, demo_wave_batch(0, 1));
+        app.section = Section::Home;
+        app.view = View::Library(Section::Home);
+        app.focus = Focus::Main;
+        app.main_selected = 0;
+
+        let actions = app.activate_main();
+        assert!(matches!(actions.first(), Some(Action::Playback { .. })));
+        assert!(app.wave.is_none());
     }
 }

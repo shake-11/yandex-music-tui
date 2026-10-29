@@ -1,6 +1,6 @@
 # Maintainer: shake_11 <shake-11@users.noreply.github.com>
 pkgname=yandex-music-tui-git
-pkgver=r1.ebddfd3
+pkgver=r2.ce8329b
 pkgrel=1
 pkgdesc="A keyboard-first, unofficial Yandex Music client for the terminal"
 arch=('x86_64' 'aarch64')

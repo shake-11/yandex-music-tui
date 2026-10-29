@@ -7,6 +7,28 @@
 
 use std::time::Duration;
 
+/// The station identifier Yandex Music uses for a listener's personal wave.
+pub const MY_WAVE_STATION: &str = "user:onyourwave";
+
+/// One batch returned by the My Wave rotor.
+#[derive(Debug, Clone, Default)]
+pub struct WaveBatch {
+    pub tracks: Vec<Track>,
+    pub batch_id: Option<String>,
+    pub radio_session_id: Option<String>,
+    /// Last track id, passed back as the queue cursor for the next batch.
+    pub last_track_id: Option<i64>,
+}
+
+/// A listening event reported back to the My Wave rotor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveFeedbackKind {
+    RadioStarted,
+    TrackStarted,
+    TrackFinished,
+    Skip,
+}
+
 /// A playable track with everything the interface needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {

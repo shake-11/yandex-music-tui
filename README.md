@@ -14,6 +14,8 @@ visible as long as possible.
 | --- | --- |
 | ![Library at 160×45](assets/screenshot-library.png) | ![Library at 80×24](assets/screenshot-compact.png) |
 
+![My Wave at 160×45](assets/screenshot-wave.png)
+
 > The screenshots are real ratatui frames exported with
 > [`examples/screenshot.rs`](examples/screenshot.rs), not mockups. Demo mode uses
 > entirely fictional artists, albums, lyrics, and generated cover art.
@@ -24,6 +26,9 @@ visible as long as possible.
   `YANDEX_MUSIC_TOKEN` / `YM_TOKEN`.
 - **Your library** — liked tracks, playlists, artists, and albums, with
   asynchronous detail views that never block the interface.
+- **My Wave** — a genuine personal radio stream, not a shuffled static queue.
+  Press `w` to tune in; new rotor batches arrive automatically at the end of the
+  queue, and listening feedback keeps the station personal.
 - **Real playback** — play/pause, next/previous, seek, volume, and mute through a
   dedicated audio thread. ALSA is used through rodio.
 - **Synced lyrics** — time-coded LRC with automatic follow, plus plain-text
@@ -32,9 +37,9 @@ visible as long as possible.
   metadata, queue context, and a full lyric sheet.
 - **Offline cache** — playback is buffered locally; press `d` to download a
   selected track ahead of time. Partial files are never treated as complete.
-- **Resilient by design** — API and artwork failures become visible status
-  messages, never panics. Library loads retry with exponential backoff and can be
-  retried immediately with `r`.
+- **Resilient by design** — API, My Wave, and artwork failures become visible
+  status messages, never panics. Failed requests retry with exponential backoff
+  and can be retried immediately with `r`.
 - **Responsive chrome** — 30/50/20 wide panes, a compact icon rail below 116
   columns, an inspector that disappears only on very narrow terminals, and
   keyboard hints that drop whole items instead of clipping them.
@@ -48,10 +53,15 @@ The repository contains a `PKGBUILD` for `yandex-music-tui-git`. It builds the
 current git revision and installs the binary, license, README, and example
 config.
 
+`makepkg` uses a `src/` directory of its own, so build the recipe from a separate
+packaging directory instead of the Rust checkout:
+
 ```sh
 sudo pacman -S --needed base-devel git rust pkg-config alsa-lib openssl
-git clone https://github.com/shake-11/yandex-music-tui.git
-cd yandex-music-tui
+git clone https://github.com/shake-11/yandex-music-tui.git /tmp/yandex-music-tui-src
+mkdir -p /tmp/yandex-music-tui-git
+install -Dm644 /tmp/yandex-music-tui-src/PKGBUILD /tmp/yandex-music-tui-git/PKGBUILD
+cd /tmp/yandex-music-tui-git
 makepkg -si
 ```
 
@@ -117,6 +127,7 @@ usable without one, but private-use icon glyphs may render as boxes.
 | `Tab` | Cycle focus between panes |
 | `Enter` | Play the selected track or open the selected collection |
 | `1`–`5` | Jump to Home, Liked, Playlists, Artists, or Albums |
+| `w` | Start My Wave or return to the live wave page |
 | `/` | Search the catalogue |
 | `Esc` | Go back or dismiss the current overlay |
 | `f` | Like / unlike the selected track |
@@ -144,6 +155,25 @@ In Now Playing, `j` / `k` nudge the lyric sheet and `g` resets it:
 - [x] manual offset while staying on the same track
 - [x] plain-text fallback when no timestamps are available
 - [x] empty state for instrumentals or unavailable lyrics
+
+## My Wave
+
+Press `w` from any screen to start or reveal **My Wave**. This talks to Yandex
+Music's real rotor station (`user:onyourwave`) and plays its progression; it is
+not a local shuffle of the saved library.
+
+- The first batch replaces the current queue when the wave starts; later batches
+  are appended. When playback reaches the end, or `n` is pressed on the last
+  queued track, another batch is requested with the previous batch's final track
+  id as the queue cursor.
+- `radioStarted`, `trackStarted`, `trackFinished`, and `skip` are reported back to
+  the station. Feedback is best-effort and never blocks playback.
+- A dropped network request is shown on the wave page and in the footer. Retries
+  use exponential backoff; press `Enter` or `r` to retry immediately. The existing
+  queue remains usable while the next batch is tuned.
+- Starting a track from another library section ends the current wave. Press `w`
+  again to start a fresh one. The player source reads `MY WAVE` while the
+  station is active.
 
 ## Configuration
 
@@ -218,8 +248,9 @@ cargo run --release --example screenshot -- \
 rsvg-convert -o assets/screenshot.png assets/screenshot.svg
 ```
 
-Other screens are available with `--screen home|liked|search|help|auth`, and
-`--dump` prints the textual frame for quick inspection.
+Other screens are available with
+`--screen home|wave|liked|search|help|auth`, and `--dump` prints the textual
+frame for quick inspection.
 
 ## Development
 
@@ -231,16 +262,18 @@ cargo build --release
 ```
 
 The library tests cover configuration, cache safety, lyrics timing, API
-selection, layout rendering at multiple breakpoints, playback queue behavior,
-and demo data. There are also CLI parsing tests.
+selection, My Wave batching and feedback, layout rendering at multiple
+breakpoints, playback queue behavior, and demo data. There are also CLI parsing
+tests.
 
 ## Known limitations
 
 - This is an unofficial client built on Yandex Music's private API. Endpoints can
   change or disappear without notice; a region restriction may make a track
   unplayable even though it appears in the library.
-- There is no shuffle, repeat, radio, playlist editing, social feed, or music
-  video support. The focus is deliberate, keyboard-driven library listening.
+- There is no shuffle, repeat, playlist editing, social feed, or music video
+  support. My Wave is the only radio station; station mood/energy tuning is not
+  exposed yet.
 - Playback currently selects MP3 variants. Gapless playback is not implemented.
 - Album art uses truecolor half-block rendering. It degrades to a generated
   placeholder rather than attempting Kitty/Sixel protocols.

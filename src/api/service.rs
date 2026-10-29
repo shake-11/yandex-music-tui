@@ -11,9 +11,11 @@ use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use yamuse::models::{
     Album as ApiAlbum, Artist as ApiArtist, DownloadInfo, Id, Playlist as ApiPlaylist,
-    Track as ApiTrack, TrackShort,
+    StationTracksResult, Track as ApiTrack, TrackShort,
 };
-use yamuse::{Client, Error as YamuseError, LyricsFormat, SearchQuery};
+use yamuse::{
+    Client, Error as YamuseError, LyricsFormat, RotorFeedback, RotorFeedbackReport, SearchQuery,
+};
 
 use crate::cache::AudioCache;
 use crate::config::AudioQuality;
@@ -21,7 +23,7 @@ use crate::cover::CoverImage;
 use crate::lyrics::Lyrics;
 use crate::model::{
     AlbumSummary, ArtistSummary, LibraryData, LoadedCollection, PlaylistSummary, SearchResults,
-    Track,
+    Track, WaveBatch, WaveFeedbackKind,
 };
 
 /// Shared client used by all background operations.
@@ -305,6 +307,49 @@ impl ApiService {
         })
     }
 
+    /// Fetch the next batch of the listener's personal My Wave.
+    ///
+    /// The first call has no queue cursor. Every later call passes the previous
+    /// batch's last track id so the rotor can continue the same session.
+    pub async fn load_wave(&self, station: &str, queue: Option<i64>) -> Result<WaveBatch, String> {
+        let result = self
+            .client
+            .rotor_station_tracks(station, queue)
+            .await
+            .map_err(|err| friendly_error(&err))?;
+        Ok(wave_batch_from_api(result))
+    }
+
+    /// Report a My Wave listening event. Feedback is best-effort: playback must
+    /// continue even when this request fails.
+    pub async fn wave_feedback(
+        &self,
+        station: &str,
+        kind: WaveFeedbackKind,
+        track_id: Option<i64>,
+        batch_id: Option<String>,
+        total_played_seconds: Option<f64>,
+    ) -> Result<(), String> {
+        let event = match kind {
+            WaveFeedbackKind::RadioStarted => RotorFeedback::RadioStarted,
+            WaveFeedbackKind::TrackStarted => RotorFeedback::TrackStarted,
+            WaveFeedbackKind::TrackFinished => RotorFeedback::TrackFinished,
+            WaveFeedbackKind::Skip => RotorFeedback::Skip,
+        };
+        let report = RotorFeedbackReport {
+            track_id,
+            batch_id,
+            from: (kind == WaveFeedbackKind::RadioStarted).then(|| "yandex-music-tui".to_owned()),
+            total_played_seconds,
+            timestamp: None,
+        };
+        self.client
+            .rotor_feedback(station, event, &report)
+            .await
+            .map(|_| ())
+            .map_err(|err| friendly_error(&err))
+    }
+
     /// Fetch time-coded lyrics, falling back to plain text.
     ///
     /// `Ok(None)` means the track genuinely has no lyrics; an error means the
@@ -538,6 +583,22 @@ fn id_key(id: &Id) -> Option<String> {
     id.as_number().map(|number| number.to_string())
 }
 
+fn wave_batch_from_api(result: StationTracksResult) -> WaveBatch {
+    let tracks: Vec<Track> = result
+        .sequence
+        .iter()
+        .filter_map(|item| item.track.as_ref())
+        .filter_map(track_from_api)
+        .collect();
+    let last_track_id = tracks.last().and_then(|track| track.id.parse::<i64>().ok());
+    WaveBatch {
+        tracks,
+        batch_id: result.batch_id,
+        radio_session_id: result.radio_session_id,
+        last_track_id,
+    }
+}
+
 fn track_from_api(track: &ApiTrack) -> Option<Track> {
     let id = track.id.as_ref()?.as_number().map(|id| id.to_string())?;
     let title = track
@@ -677,7 +738,7 @@ fn playlist_cover(playlist: &ApiPlaylist) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yamuse::models::DownloadInfo;
+    use yamuse::models::{DownloadInfo, Sequence};
 
     fn download(codec: &str, bitrate: i64, preview: bool) -> DownloadInfo {
         DownloadInfo {
@@ -722,5 +783,50 @@ mod tests {
     fn preview_only_variants_are_never_selected() {
         let infos = vec![download("mp3", 320, true)];
         assert!(choose_mp3(&infos, AudioQuality::Best).is_none());
+    }
+
+    #[test]
+    fn a_wave_batch_keeps_its_feedback_ids_and_queue_cursor() {
+        let sequence = vec![
+            Sequence {
+                track: Some(ApiTrack {
+                    id: Some(Id::Number(42)),
+                    title: Some("First signal".into()),
+                    duration_ms: Some(180_000),
+                    available: Some(true),
+                    ..ApiTrack::default()
+                }),
+                ..Sequence::default()
+            },
+            Sequence {
+                track: Some(ApiTrack {
+                    id: Some(Id::Number(43)),
+                    title: Some("Second signal".into()),
+                    duration_ms: Some(205_000),
+                    available: Some(true),
+                    ..ApiTrack::default()
+                }),
+                ..Sequence::default()
+            },
+        ];
+        let batch = wave_batch_from_api(StationTracksResult {
+            batch_id: Some("batch-7".into()),
+            radio_session_id: Some("radio-1".into()),
+            sequence,
+            ..StationTracksResult::default()
+        });
+
+        assert_eq!(batch.tracks.len(), 2);
+        assert_eq!(batch.tracks[1].title, "Second signal");
+        assert_eq!(batch.batch_id.as_deref(), Some("batch-7"));
+        assert_eq!(batch.radio_session_id.as_deref(), Some("radio-1"));
+        assert_eq!(batch.last_track_id, Some(43));
+    }
+
+    #[test]
+    fn an_empty_wave_batch_has_no_queue_cursor() {
+        let batch = wave_batch_from_api(StationTracksResult::default());
+        assert!(batch.tracks.is_empty());
+        assert_eq!(batch.last_track_id, None);
     }
 }
